@@ -1,0 +1,57 @@
+# @package _global_
+dataset:
+  _target_: src.data.SyntheticCancerDatasetCollection   # Will be dynamically instantiated
+  name: tumor_generator
+  coeff: 4                                            # Confounding coefficient (gamma)
+  chemo_coeff: ${dataset.coeff}                         # Confounding coefficient of chemotherapy
+  radio_coeff: ${dataset.coeff}                         # Confounding coefficient of radiotherapy
+  seed: ${exp.seed}
+  num_patients:
+    train: 10000
+    val: 1000
+    test: 1000
+  window_size: 15                                       # Used for biased treatment assignment
+  lag: 0                                                # Lag for treatment assignment window
+  max_seq_length: 60                                    # Max length of time series
+  projection_horizon: 5                                 # Range of tau-step-ahead prediction (tau = projection_horizon + 1)
+  cf_seq_mode: sliding_treatment                        # sliding_treatment / random_trajectories
+  val_batch_size: 512                                   # Batch size for evaluation
+  treatment_mode: multilabel                            # multiclass / multilabel -- for RMSN
+
+model:
+  dim_treatments: 4
+  dim_vitals: 0
+  dim_static_features: 1
+  dim_outcomes: 1
+  min_length : 1
+  lag_features : 1
+  name: MSM
+  propensity_treatment:
+    _target_: src.models.msm.MSMPropensityTreatment
+  propensity_history:
+    _target_: src.models.msm.MSMPropensityHistory
+  msm_regressor:
+    _target_: src.models.msm.MSMRegressor
+
+exp:
+  unscale_rmse: True
+  percentage_rmse: True
+  seed: 100
+  max_epochs: 100
+  gpus: [0]                         # Number of GPUs to use / indices of GPUs like [0,1]
+  logging: True                     # Logging to MlFlow
+  mlflow_uri: http://127.0.0.1:8081 # MlFlow server
+  alpha: 1.0                        # Has no full effect, if update_alpha is True
+  update_alpha: False                # Exponential growth of alpha from 0.0 to 1.0
+  alpha_rate: exp                   # exp / lin
+  balancing:                        # grad_reverse / domain_confusion
+
+  bce_weight: False                 # Weight in BCE loss, proportional to treatment frequency
+  weights_ema:                      # Exponential moving average of weights
+  beta: 0.99                        # EMA beta
+
+# # Hydra defaults
+# defaults:
+#   - _self_
+#   - override hydra/hydra_logging: colorlog
+#   - override hydra/job_logging: colorlog
