@@ -4,3 +4,4 @@ from src.models.crn import CRN, CRNEncoder, CRNDecoder
 from src.models.gnet import GNet
 from src.models.edct import EDCT, EDCTEncoder, EDCTDecoder
 from src.models.ct import CT
+from src.models.CausalDiff import *

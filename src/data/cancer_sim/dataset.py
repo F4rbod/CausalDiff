@@ -251,7 +251,7 @@ class SyntheticCancerDataset(Dataset):
         seq2seq_outputs = seq2seq_outputs[:total_seq2seq_rows, :, :]
         seq2seq_prev_outputs = seq2seq_prev_outputs[:total_seq2seq_rows, :, :]
         # seq2seq_vitals = seq2seq_vitals[:total_seq2seq_rows, :, :]
-        # seq2seq_next_vitals = seq2seq_next_vitals[:total_seq2seq_rows, :, :]
+        # seq2seq_next_vitals = seq2seq_next_vitals[:total_seq2seqprocessed_rows, :, :]
         seq2seq_active_entries = seq2seq_active_entries[:total_seq2seq_rows, :, :]
         seq2seq_sequence_lengths = seq2seq_sequence_lengths[:total_seq2seq_rows]
 

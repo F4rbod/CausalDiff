@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 
 from src.data import RealDatasetCollection, SyntheticDatasetCollection
+from src.data.cancer_sim.dataset import SyntheticCancerDataset
 from src.models import TimeVaryingCausalModel
 from src.models.utils import (
     grad_reverse,
@@ -28,6 +29,71 @@ from src.models.utils_lstm import VariationalLSTM
 from copy import deepcopy
 
 logger = logging.getLogger(__name__)
+
+# Data embedding before feeding into the model
+
+# This will first one-hot encode all the categorical features and then embed them to n columns. The resulting columns will then be concatenated with the numerical features. The result will then be used to create the torch tensor for the model. The torch tensor will be shaped as (Cases, Time, Features).
+
+# The input data will be a dataframe like this:
+
+
+class DataEmbedder(nn.Module):
+    def __init__(self, categorical_indices_sizes, numerical_indices, dataset):
+        super(DataEmbedder, self).__init__()
+        # dictionary with feature name, and a list of index and size
+        self.categoricals = categorical_indices_sizes
+        self.numerics = numerical_indices  # dictionary with feature name and index
+        self.embeddings = nn.ModuleDict()
+        self.mapping_dicts = {}
+
+        # Initialize embeddings and mapping dictionaries
+        for key in self.categoricals:
+            unique_values = np.unique(dataset[:, :, self.categoricals[key][0]])
+            self.mapping_dicts[key] = {
+                name: idx for idx, name in enumerate(unique_values)
+            }
+            self.embeddings[key] = nn.Embedding(
+                num_embeddings=len(unique_values),
+                embedding_dim=self.categoricals[key][1],
+            )
+            print(
+                f"Feature: {key}, Categories: {len(unique_values)}, Embedding Size: {self.categoricals[key][1]}"
+            )
+
+    def forward(self, dataset):
+        # Apply embeddings to the categorical indices
+        if len(self.categoricals) == 0:
+            return dataset
+        else:
+            embedded_features = []
+            for key in self.categoricals:
+                # Map the categorical values to their corresponding indices
+                indices = dataset[:, :,
+                                  self.categoricals[key][0]].cpu().numpy()
+                mapped_indices = np.vectorize(
+                    self.mapping_dicts[key].get)(indices)
+                mapped_indices = torch.tensor(
+                    mapped_indices, dtype=torch.long, device=dataset.device
+                )
+                # print(f"Feature: {key}, Mapped Indices: {mapped_indices}")
+                embedded_features.append(self.embeddings[key](mapped_indices))
+
+            embedded_features = torch.cat(embedded_features, dim=-1)
+
+            numeric_features = dataset[:, :, list(
+                self.numerics.values())].float()
+
+            # Concatenate the embedded features with the numerical data
+            result = torch.cat([embedded_features, numeric_features], dim=-1)
+
+            feature_count_embedded = len(self.numerics) + sum(
+                [self.categoricals[key][1] for key in self.categoricals]
+            )
+
+            result = result.reshape(
+                dataset.shape[0], -1, feature_count_embedded)
+
+            return result
 
 class moded_TimesSeriesAttention(nn.Module):
     """
@@ -1091,6 +1157,7 @@ class diffusion_imputation(nn.Module):
         dropout=0.1,
         method="rsa",
         device="cpu",
+        sequence_length=None
     ):
 
         super().__init__()
@@ -1105,6 +1172,7 @@ class diffusion_imputation(nn.Module):
         self.exclude_features = excluded_features
         self.features_to_impute_completely = features_to_impute_completely
         self.features_to_impute_after_time = features_to_impute_after_time
+        self.sequence_length = sequence_length
 
         # set device to cuda if available
         if torch.cuda.is_available():
@@ -1179,6 +1247,13 @@ class diffusion_imputation(nn.Module):
             mask = torch.zeros_like(data)
             mask[:, -self.last_n_time:, self.features_to_impute] = 1
 
+        if strategy == "selected_features_last_n_sequence_length":
+            assert self.sequence_length is not None
+            mask = torch.zeros_like(data)
+            for i in range(len(self.sequence_length)):
+                sequence_length = int(self.sequence_length[i])
+                mask[i, (sequence_length - self.last_n_time):sequence_length, self.features_to_impute] = 1
+
         if strategy == "random":
             mask = torch.rand(size=(b, t, f))
             mask = mask < self.missing_prp
@@ -1202,11 +1277,169 @@ class diffusion_imputation(nn.Module):
         loss = (residual**2).sum() / num_obs
         return loss
 
+    def weighted_loss_func(self, predicted_noise, noise, noise_mask, stabilized_weights):
+        # Calculate the residuals
+        residual = noise - predicted_noise
+
+        # Get the sample weights
+        # print(f"stabilized_weights shape: {stabilized_weights.shape}")
+        sw = stabilized_weights.to(self.device)
+        sw = sw.unsqueeze(-1).repeat(1, 1, residual.shape[-1]) * noise_mask
+        # print(residual.shape)
+        # print(sw)
+        # Apply the sample weights to the squared residuals
+        weighted_squared_residuals = (residual**2) * sw
+
+        # Sum the weighted squared residuals
+        weighted_loss_sum = weighted_squared_residuals.sum()
+
+        # Normalize the loss by the sum of the weights
+        loss = weighted_loss_sum / sw.sum()
+
+        # print(loss)
+        return loss
+
+    def explode_trajectories(self, data, projection_horizon):
+
+        self.data = data
+        # assert self.processed
+
+        # logger.info(f'Exploding {self.subset_name} dataset before testing (multiple sequences)')
+
+        outputs = self.data['outputs']
+        prev_outputs = self.data['prev_outputs']
+        sequence_lengths = self.data['sequence_lengths']
+        # vitals = self.data['vitals']
+        # next_vitals = self.data['next_vitals']
+        active_entries = self.data['active_entries']
+        current_treatments = self.data['current_treatments']
+        previous_treatments = self.data['prev_treatments']
+        static_features = self.data['static_features']
+        if 'stabilized_weights' in self.data:
+            stabilized_weights = self.data['stabilized_weights']
+
+        num_patients, max_seq_length, num_features = outputs.shape
+        num_seq2seq_rows = num_patients * max_seq_length
+
+        seq2seq_previous_treatments = np.zeros(
+            (num_seq2seq_rows, max_seq_length, previous_treatments.shape[-1]))
+        seq2seq_current_treatments = np.zeros(
+            (num_seq2seq_rows, max_seq_length, current_treatments.shape[-1]))
+        seq2seq_static_features = np.zeros(
+            (num_seq2seq_rows, static_features.shape[-1]))
+        seq2seq_outputs = np.zeros(
+            (num_seq2seq_rows, max_seq_length, outputs.shape[-1]))
+        seq2seq_prev_outputs = np.zeros(
+            (num_seq2seq_rows, max_seq_length, prev_outputs.shape[-1]))
+        # seq2seq_vitals = np.zeros((num_seq2seq_rows, max_seq_length, vitals.shape[-1]))
+        # seq2seq_next_vitals = np.zeros((num_seq2seq_rows, max_seq_length - 1, next_vitals.shape[-1]))
+        seq2seq_active_entries = np.zeros(
+            (num_seq2seq_rows, max_seq_length, active_entries.shape[-1]))
+        seq2seq_sequence_lengths = np.zeros(num_seq2seq_rows)
+        if 'stabilized_weights' in self.data:
+            seq2seq_stabilized_weights = np.zeros(
+                (num_seq2seq_rows, max_seq_length))
+
+        total_seq2seq_rows = 0  # we use this to shorten any trajectories later
+
+        for i in range(num_patients):
+            sequence_length = int(sequence_lengths[i])
+
+            for t in range(projection_horizon, sequence_length):  # shift outputs back by 1
+                seq2seq_active_entries[total_seq2seq_rows, :(
+                    t + 1), :] = active_entries[i, :(t + 1), :]
+                if 'stabilized_weights' in self.data:
+                    seq2seq_stabilized_weights[total_seq2seq_rows, :(
+                        t + 1)] = stabilized_weights[i, :(t + 1)]
+                seq2seq_previous_treatments[total_seq2seq_rows, :(
+                    t + 1), :] = previous_treatments[i, :(t + 1), :]
+                seq2seq_current_treatments[total_seq2seq_rows, :(
+                    t + 1), :] = current_treatments[i, :(t + 1), :]
+                seq2seq_outputs[total_seq2seq_rows, :(
+                    t + 1), :] = outputs[i, :(t + 1), :]
+                seq2seq_prev_outputs[total_seq2seq_rows, :(
+                    t + 1), :] = prev_outputs[i, :(t + 1), :]
+                # seq2seq_vitals[total_seq2seq_rows, :(t + 1), :] = vitals[i, :(t + 1), :]
+                # seq2seq_next_vitals[total_seq2seq_rows, :min(t + 1, sequence_length - 1), :] = \
+                #     next_vitals[i, :min(t + 1, sequence_length - 1), :]
+                seq2seq_sequence_lengths[total_seq2seq_rows] = t + 1
+                seq2seq_static_features[total_seq2seq_rows] = static_features[i]
+
+                total_seq2seq_rows += 1
+
+        # Filter everything shorter
+        seq2seq_previous_treatments = seq2seq_previous_treatments[:total_seq2seq_rows, :, :]
+        seq2seq_current_treatments = seq2seq_current_treatments[:total_seq2seq_rows, :, :]
+        seq2seq_static_features = seq2seq_static_features[:total_seq2seq_rows, :]
+        seq2seq_outputs = seq2seq_outputs[:total_seq2seq_rows, :, :]
+        seq2seq_prev_outputs = seq2seq_prev_outputs[:total_seq2seq_rows, :, :]
+        # seq2seq_vitals = seq2seq_vitals[:total_seq2seq_rows, :, :]
+        # seq2seq_next_vitals = seq2seq_next_vitals[:total_seq2seqprocessed_rows, :, :]
+        seq2seq_active_entries = seq2seq_active_entries[:total_seq2seq_rows, :, :]
+        seq2seq_sequence_lengths = seq2seq_sequence_lengths[:total_seq2seq_rows]
+
+        if 'stabilized_weights' in self.data:
+            seq2seq_stabilized_weights = seq2seq_stabilized_weights[:total_seq2seq_rows]
+
+        new_data = {
+            'prev_treatments': seq2seq_previous_treatments,
+            'current_treatments': seq2seq_current_treatments,
+            'static_features': seq2seq_static_features,
+            'prev_outputs': seq2seq_prev_outputs,
+            'outputs': seq2seq_outputs,
+            # 'vitals': seq2seq_vitals,
+            # 'next_vitals': seq2seq_next_vitals,
+            # 'unscaled_outputs': seq2seq_outputs * self.scaling_params['output_stds'] + self.scaling_params['output_means'],
+            'sequence_lengths': seq2seq_sequence_lengths,
+            'active_entries': seq2seq_active_entries,
+        }
+        if 'stabilized_weights' in self.data:
+            new_data['stabilized_weights'] = seq2seq_stabilized_weights
+
+        # self.data = new_data
+        # self.exploded = True
+
+        # data_shapes = {k: v.shape for k, v in self.data.items()}
+        # logger.info(f'Shape of processed {self.subset_name} data: {data_shapes}')
+
+        return new_data
+
+    def get_exploded_dataset(self, dataset, min_length=1, only_active_entries=True, max_length=None):
+        exploded_dataset = deepcopy(dataset)
+        if max_length is None:
+            max_length = max(exploded_dataset['sequence_lengths'][:])
+        if not only_active_entries:
+            exploded_dataset['active_entries'][:, :, :] = 1.0
+            exploded_dataset['sequence_lengths'][:] = max_length
+        # exploded_dataset.explode_trajectories(min_length)
+        exploded_dataset = self.explode_trajectories(
+            exploded_dataset, min_length)
+        return exploded_dataset
+
     def forward(self, data):
 
+        # data = self.get_exploded_dataset(data, 1, only_active_entries=True)
+        # curr_treatments = data['current_treatments']
+        # vitals_or_prev_outputs = []
+        # # vitals_or_prev_outputs.append(data['vitals']) if self.has_vitals else None
+        # # if self.autoregressive else None
+        # vitals_or_prev_outputs.append(data['prev_outputs'])
+        # vitals_or_prev_outputs = torch.cat(vitals_or_prev_outputs, dim=-1)
+        # static_features = data['static_features']
+        # outputs = data['outputs']
+
+        # x = torch.cat((vitals_or_prev_outputs, curr_treatments), dim=-1)
+        # x = torch.cat((x, static_features.unsqueeze(
+        #     1).expand(-1, x.size(1), -1)), dim=-1)
+        # x = torch.cat((x, outputs), dim=-1)
+        # data = x
+        # data = data.to(self.device)
+        # print(f"Data shape: {data.shape}")
+        # print(data)
         b, t, f = data.shape
 
         noise_mask = self.get_mask(data, self.strategy).to(self.device)
+        # print(noise_mask[0])
         noise = torch.randn((b, t, f)).to(self.device)
         noise = noise_mask * noise
 
@@ -1387,32 +1620,32 @@ class diffusion_imputation(nn.Module):
 
         return (imputed_samples, data, imputation_mask, mae)
 
-# New main function for config handling and logging initialization
-def main(config: DictConfig):
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
-    logger.info("Starting CausalDiff with config:\n%s", OmegaConf.to_yaml(config))
-    
-    # Instantiate your model or application components using config args.
-    # Example:
-    # model = ModelLoop(
-    #     embed_dim=config.model.embed_dim,
-    #     diffusion_steps=config.model.diffusion_steps,
-    #     num_heads=config.model.num_heads,
-    #     kernel_size=config.model.kernel_size,
-    #     ff_dim=config.model.ff_dim,
-    #     num_cells=config.model.num_cells,
-    #     dropout=config.model.dropout,
-    #     num_residual_layers=config.model.num_residual_layers,
-    #     method=config.model.method,
-    #     device=config.device,
-    # )
-    # ...additional logic for training/evaluation...
+# # New main function for config handling and logging initialization
+# def main(config: DictConfig):
+#     logging.basicConfig(level=logging.INFO)
+#     logger = logging.getLogger(__name__)
+#     logger.info("Starting CausalDiff with config:\n%s", OmegaConf.to_yaml(config))
 
-# Main guard to load config and start main()
-if __name__ == "__main__":
-    import sys
-    # Load config from the provided YAML file or use a default path
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/causaldiff.yaml"
-    config = OmegaConf.load(config_path)
-    main(config)
+#     # Instantiate your model or application components using config args.
+#     # Example:
+#     # model = ModelLoop(
+#     #     embed_dim=config.model.embed_dim,
+#     #     diffusion_steps=config.model.diffusion_steps,
+#     #     num_heads=config.model.num_heads,
+#     #     kernel_size=config.model.kernel_size,
+#     #     ff_dim=config.model.ff_dim,
+#     #     num_cells=config.model.num_cells,
+#     #     dropout=config.model.dropout,
+#     #     num_residual_layers=config.model.num_residual_layers,
+#     #     method=config.model.method,
+#     #     device=config.device,
+#     # )
+#     # ...additional logic for training/evaluation...
+
+# # Main guard to load config and start main()
+# if __name__ == "__main__":
+#     import sys
+#     # Load config from the provided YAML file or use a default path
+#     config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/causaldiff.yaml"
+#     config = OmegaConf.load(config_path)
+#     main(config)
