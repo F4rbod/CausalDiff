@@ -9,6 +9,7 @@ import pickle
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from einops import rearrange
 
 import torch
 import torch.nn as nn
@@ -1250,9 +1251,14 @@ class diffusion_imputation(nn.Module):
         if strategy == "selected_features_last_n_sequence_length":
             assert self.sequence_length is not None
             mask = torch.zeros_like(data)
-            for i in range(len(self.sequence_length)):
+            for i in range(self.sequence_length.shape[0]):
                 sequence_length = int(self.sequence_length[i])
-                mask[i, (sequence_length - self.last_n_time):sequence_length, self.features_to_impute] = 1
+                if i < mask.shape[0]:
+                    mask[i, (sequence_length - self.last_n_time)
+                             :sequence_length, self.features_to_impute] = 1
+
+        if strategy == "whole_sequence":
+            mask = torch.ones_like(data)
 
         if strategy == "random":
             mask = torch.rand(size=(b, t, f))
@@ -1284,6 +1290,8 @@ class diffusion_imputation(nn.Module):
         # Get the sample weights
         # print(f"stabilized_weights shape: {stabilized_weights.shape}")
         sw = stabilized_weights.to(self.device)
+        # clip sw at 5th and 95th percentile
+        sw = torch.clamp(sw, 0.05, 0.95)
         sw = sw.unsqueeze(-1).repeat(1, 1, residual.shape[-1]) * noise_mask
         # print(residual.shape)
         # print(sw)
@@ -1315,6 +1323,9 @@ class diffusion_imputation(nn.Module):
         current_treatments = self.data['current_treatments']
         previous_treatments = self.data['prev_treatments']
         static_features = self.data['static_features']
+        # repeat static features t times (first dimension in outputs)
+        static_features = static_features.unsqueeze(
+            1).repeat(1, outputs.shape[1], 1)
         if 'stabilized_weights' in self.data:
             stabilized_weights = self.data['stabilized_weights']
 
@@ -1326,7 +1337,7 @@ class diffusion_imputation(nn.Module):
         seq2seq_current_treatments = np.zeros(
             (num_seq2seq_rows, max_seq_length, current_treatments.shape[-1]))
         seq2seq_static_features = np.zeros(
-            (num_seq2seq_rows, static_features.shape[-1]))
+            (num_seq2seq_rows, max_seq_length, static_features.shape[-1]))
         seq2seq_outputs = np.zeros(
             (num_seq2seq_rows, max_seq_length, outputs.shape[-1]))
         seq2seq_prev_outputs = np.zeros(
@@ -1359,11 +1370,13 @@ class diffusion_imputation(nn.Module):
                     t + 1), :] = outputs[i, :(t + 1), :]
                 seq2seq_prev_outputs[total_seq2seq_rows, :(
                     t + 1), :] = prev_outputs[i, :(t + 1), :]
+                seq2seq_static_features[total_seq2seq_rows, :(
+                    t + 1), :] = static_features[i, :(t + 1), :]
                 # seq2seq_vitals[total_seq2seq_rows, :(t + 1), :] = vitals[i, :(t + 1), :]
                 # seq2seq_next_vitals[total_seq2seq_rows, :min(t + 1, sequence_length - 1), :] = \
                 #     next_vitals[i, :min(t + 1, sequence_length - 1), :]
                 seq2seq_sequence_lengths[total_seq2seq_rows] = t + 1
-                seq2seq_static_features[total_seq2seq_rows] = static_features[i]
+                # seq2seq_static_features[total_seq2seq_rows] = static_features[i]
 
                 total_seq2seq_rows += 1
 
@@ -1440,6 +1453,7 @@ class diffusion_imputation(nn.Module):
 
         noise_mask = self.get_mask(data, self.strategy).to(self.device)
         # print(noise_mask[0])
+        # print(data[0])
         noise = torch.randn((b, t, f)).to(self.device)
         noise = noise_mask * noise
 

@@ -191,6 +191,140 @@ class SyntheticCancerDataset(Dataset):
 
         return self.data
 
+    def process_data_cf_one_step(self, scaling_params):
+        """
+        Pre-process dataset for one-step-ahead prediction
+        Args:
+            scaling_params: dict of standard normalization parameters (calculated with train subset)
+        """
+        if not self.processed:
+            logger.info(
+                f'Processing {self.subset_name} dataset before training')
+
+            mean, std = scaling_params
+
+            horizon = 1
+            offset = 1
+
+            mean['chemo_application'] = 0
+            mean['radio_application'] = 0
+            std['chemo_application'] = 1
+            std['radio_application'] = 1
+
+            # , 'median_cancer_volume', 'cancer_volume_5th_percentile', 'cancer_volume_95th_percentile']].values.flatten()
+            input_means = mean[['cancer_volume', 'patient_types',
+                                'chemo_application', 'radio_application']].values.flatten()
+            # , 'median_cancer_volume', 'cancer_volume_5th_percentile', 'cancer_volume_95th_percentile']].values.flatten()
+            input_stds = std[['cancer_volume', 'patient_types',
+                              'chemo_application', 'radio_application']].values.flatten()
+
+            # Continuous values
+            cancer_volume = (
+                self.data['cancer_volume'] - mean['cancer_volume']) / std['cancer_volume']
+            median_cancer_volume = (
+                self.data['median_cancer_volume'] - mean['cancer_volume']) / std['cancer_volume']
+            cancer_volume_5th_percentile = (
+                self.data['cancer_volume_5th_percentile'] - mean['cancer_volume']) / std['cancer_volume']
+            cancer_volume_95th_percentile = (
+                self.data['cancer_volume_95th_percentile'] - mean['cancer_volume']) / std['cancer_volume']
+            patient_types = (
+                self.data['patient_types'] - mean['patient_types']) / std['patient_types']
+
+            patient_types = np.stack(
+                [patient_types for t in range(cancer_volume.shape[1])], axis=1)
+
+            # Binary application
+            chemo_application = self.data['chemo_application']
+            radio_application = self.data['radio_application']
+            sequence_lengths = self.data['sequence_lengths']
+
+            # Convert prev_treatments to one-hot encoding
+
+            treatments = np.concatenate(
+                [chemo_application[:, :-offset, np.newaxis], radio_application[:, :-offset, np.newaxis]], axis=-1)
+
+            if self.treatment_mode == 'multiclass':
+                one_hot_treatments = np.zeros(
+                    shape=(treatments.shape[0], treatments.shape[1], 4))
+                for patient_id in range(treatments.shape[0]):
+                    for timestep in range(treatments.shape[1]):
+                        if (treatments[patient_id][timestep][0] == 0 and treatments[patient_id][timestep][1] == 0):
+                            one_hot_treatments[patient_id][timestep] = [
+                                1, 0, 0, 0]
+                        elif (treatments[patient_id][timestep][0] == 1 and treatments[patient_id][timestep][1] == 0):
+                            one_hot_treatments[patient_id][timestep] = [
+                                0, 1, 0, 0]
+                        elif (treatments[patient_id][timestep][0] == 0 and treatments[patient_id][timestep][1] == 1):
+                            one_hot_treatments[patient_id][timestep] = [
+                                0, 0, 1, 0]
+                        elif (treatments[patient_id][timestep][0] == 1 and treatments[patient_id][timestep][1] == 1):
+                            one_hot_treatments[patient_id][timestep] = [
+                                0, 0, 0, 1]
+
+                one_hot_previous_treatments = one_hot_treatments[:, :-1, :]
+
+                self.data['prev_treatments'] = one_hot_previous_treatments
+                self.data['current_treatments'] = one_hot_treatments
+
+            elif self.treatment_mode == 'multilabel':
+                self.data['prev_treatments'] = treatments[:, :-1, :]
+                self.data['current_treatments'] = treatments
+
+            current_covariates = np.concatenate([
+                cancer_volume[:, :-offset, np.newaxis],
+                patient_types[:, :-offset, np.newaxis]],
+                axis=-1)
+
+            outputs = np.concatenate([
+                cancer_volume[:, horizon:, np.newaxis],
+                median_cancer_volume[:, horizon:, np.newaxis],
+                cancer_volume_5th_percentile[:, horizon:, np.newaxis],
+                cancer_volume_95th_percentile[:, horizon:, np.newaxis]],
+                axis=-1)
+
+            output_means = mean[['cancer_volume']].values.flatten()[0]
+            output_stds = std[['cancer_volume']].values.flatten()[0]
+
+            # Add active entires
+            active_entries = np.zeros(outputs[:, :, 0:1].shape)
+
+            for i in range(sequence_lengths.shape[0]):
+                sequence_length = int(sequence_lengths[i])
+                active_entries[i, :sequence_length, :] = 1
+
+            self.data['current_covariates'] = current_covariates
+            self.data['outputs'] = outputs
+            self.data['active_entries'] = active_entries
+
+            self.data['unscaled_outputs'] = (
+                outputs * std['cancer_volume'] + mean['cancer_volume'])
+
+            self.scaling_params = {
+                'input_means': input_means,
+                'inputs_stds': input_stds,
+                'output_means': output_means,
+                'output_stds': output_stds
+            }
+
+            # Unified data format
+            self.data['prev_outputs'] = current_covariates[:, :, :1]
+            self.data['static_features'] = current_covariates[:, 0, 1:]
+            zero_init_treatment = np.zeros(
+                shape=[current_covariates.shape[0], 1, self.data['prev_treatments'].shape[-1]])
+            self.data['prev_treatments'] = np.concatenate(
+                [zero_init_treatment, self.data['prev_treatments']], axis=1)
+
+            data_shapes = {k: v.shape for k, v in self.data.items()}
+            logger.info(
+                f'Shape of processed {self.subset_name} data: {data_shapes}')
+
+            self.processed = True
+        else:
+            logger.info(f'{self.subset_name} Dataset already processed')
+
+        return self.data
+
+
     def explode_trajectories(self, projection_horizon):
         assert self.processed
 
@@ -257,7 +391,6 @@ class SyntheticCancerDataset(Dataset):
 
         if 'stabilized_weights' in self.data:
             seq2seq_stabilized_weights = seq2seq_stabilized_weights[:total_seq2seq_rows]
-
         new_data = {
             'prev_treatments': seq2seq_previous_treatments,
             'current_treatments': seq2seq_current_treatments,

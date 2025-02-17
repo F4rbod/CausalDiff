@@ -369,12 +369,208 @@ def simulate_factual(simulation_params, seq_length, assigned_actions=None):
     return outputs
 
 
+# def simulate_counterfactual_1_step(simulation_params, seq_length):
+#     """
+#     Simulation of test trajectories to asses all one-step ahead counterfactuals
+#     :param simulation_params: Parameters of the simulation
+#     :param seq_length: Maximum trajectory length (number of factual time-steps)
+#     :return: simulated data dict with number of rows equal to num_patients * seq_length * num_treatments
+#     """
+
+#     total_num_radio_treatments = 1
+#     total_num_chemo_treatments = 1
+
+#     num_treatments = 4  # No treatment / Chemotherapy / Radiotherapy / Chemotherapy + Radiotherapy
+
+#     radio_amt = np.array([2.0 for i in range(total_num_radio_treatments)])  # Gy
+#     # radio_days = np.array([i + 1 for i in range(total_num_radio_treatments)])
+#     chemo_amt = [5.0 for i in range(total_num_chemo_treatments)]
+#     chemo_days = [(i + 1) * 7 for i in range(total_num_chemo_treatments)]
+
+#     # sort this
+#     chemo_idx = np.argsort(chemo_days)
+#     chemo_amt = np.array(chemo_amt)[chemo_idx]
+#     chemo_days = np.array(chemo_days)[chemo_idx]
+
+#     drug_half_life = 1  # one day half life for drugs
+
+#     # Unpack simulation parameters
+#     initial_stages = simulation_params['initial_stages']
+#     initial_volumes = simulation_params['initial_volumes']
+#     alphas = simulation_params['alpha']
+#     rhos = simulation_params['rho']
+#     betas = simulation_params['beta']
+#     beta_cs = simulation_params['beta_c']
+#     Ks = simulation_params['K']
+#     patient_types = simulation_params['patient_types']
+#     window_size = simulation_params['window_size']  # controls the lookback of the treatment assignment policy
+#     lag = simulation_params['lag']
+
+#     # Coefficients for treatment assignment probabilities
+#     chemo_sigmoid_intercepts = simulation_params['chemo_sigmoid_intercepts']
+#     radio_sigmoid_intercepts = simulation_params['radio_sigmoid_intercepts']
+#     chemo_sigmoid_betas = simulation_params['chemo_sigmoid_betas']
+#     radio_sigmoid_betas = simulation_params['radio_sigmoid_betas']
+
+#     num_patients = initial_stages.shape[0]
+
+#     num_test_points = num_patients * seq_length * num_treatments
+
+#     # Commence Simulation
+#     cancer_volume = np.zeros((num_test_points, seq_length))
+#     chemo_application_point = np.zeros((num_test_points, seq_length))
+#     radio_application_point = np.zeros((num_test_points, seq_length))
+#     sequence_lengths = np.zeros(num_test_points)
+#     patient_types_all_trajectories = np.zeros(num_test_points)
+
+#     test_idx = 0
+
+#     # Run actual simulation
+#     for i in tqdm(range(num_patients), total=num_patients):
+
+#         # if i % 200 == 0:
+#         #     logging.info("Simulating patient {} of {}".format(i, num_patients))
+
+#         noise = 0.01 * np.random.randn(seq_length)  # 5% cell variability
+#         recovery_rvs = np.random.rand(seq_length)
+
+#         # initial values
+#         factual_cancer_volume = np.zeros(seq_length)
+#         factual_chemo_dosage = np.zeros(seq_length)
+#         factual_radio_dosage = np.zeros(seq_length)
+#         factual_chemo_application_point = np.zeros(seq_length)
+#         factual_radio_application_point = np.zeros(seq_length)
+#         factual_chemo_probabilities = np.zeros(seq_length)
+#         factual_radio_probabilities = np.zeros(seq_length)
+
+#         chemo_application_rvs = np.random.rand(seq_length)
+#         radio_application_rvs = np.random.rand(seq_length)
+
+#         factual_cancer_volume[0] = initial_volumes[i]
+
+#         alpha = alphas[i]
+#         beta = betas[i]
+#         beta_c = beta_cs[i]
+#         rho = rhos[i]
+#         K = Ks[i]
+
+#         for t in range(0, seq_length - 1):
+
+#             # Factual prev_treatments and outcomes
+#             current_chemo_dose = 0.0
+#             previous_chemo_dose = 0.0 if t == 0 else factual_chemo_dosage[t - 1]
+
+#             # Action probabilities + death or recovery simulations
+#             if t >= lag:
+#                 cancer_volume_used = cancer_volume[i, max(t - window_size - lag, 0):max(t - lag + 1, 0)]
+#             else:
+#                 cancer_volume_used = np.zeros((1, ))
+#             cancer_diameter_used = np.array(
+#                 [calc_diameter(vol) for vol in cancer_volume_used]).mean()  # mean diameter over 15 days
+#             cancer_metric_used = cancer_diameter_used
+
+#             # probabilities
+#             radio_prob = (1.0 / (1.0 + np.exp(-radio_sigmoid_betas[i] * (cancer_metric_used - radio_sigmoid_intercepts[i]))))
+#             chemo_prob = (1.0 / (1.0 + np.exp(- chemo_sigmoid_betas[i] * (cancer_metric_used - chemo_sigmoid_intercepts[i]))))
+
+#             factual_chemo_probabilities[t] = chemo_prob
+#             factual_radio_probabilities[t] = radio_prob
+
+#             # Action application
+#             if radio_application_rvs[t] < radio_prob:
+#                 factual_radio_application_point[t] = 1
+#                 factual_radio_dosage[t] = radio_amt[0]
+
+#             if chemo_application_rvs[t] < chemo_prob:
+#                 factual_chemo_application_point[t] = 1
+#                 current_chemo_dose = chemo_amt[0]
+
+#             # Update chemo dosage
+#             factual_chemo_dosage[t] = previous_chemo_dose * np.exp(-np.log(2) / drug_half_life) + current_chemo_dose
+
+#             # Factual prev_treatments and outcomes
+#             factual_cancer_volume[t + 1] = factual_cancer_volume[t] * \
+#                 (1 + rho * np.log(K / factual_cancer_volume[t]) - beta_c * factual_chemo_dosage[t] -
+#                     (alpha * factual_radio_dosage[t] + beta * factual_radio_dosage[t] ** 2) + noise[t + 1])
+
+#             factual_cancer_volume[t + 1] = np.clip(factual_cancer_volume[t + 1], 0, TUMOUR_DEATH_THRESHOLD)
+
+#             # Populate arrays
+#             cancer_volume[test_idx] = factual_cancer_volume
+#             chemo_application_point[test_idx] = factual_chemo_application_point
+#             radio_application_point[test_idx] = factual_radio_application_point
+#             patient_types_all_trajectories[test_idx] = patient_types[i]
+#             sequence_lengths[test_idx] = int(t) + 1
+#             test_idx = test_idx + 1
+
+#             # Counterfactual prev_treatments and outcomes
+#             treatment_options = [(0, 0), (0, 1), (1, 0), (1, 1)]  # First = chemo; second = radio
+
+#             for treatment_option in treatment_options:
+#                 if (factual_chemo_application_point[t] == treatment_option[0] and factual_radio_application_point[t] ==
+#                         treatment_option[1]):
+#                     # This represents the factual treatment which was already considered
+#                     continue
+#                 current_chemo_dose = 0.0
+#                 counterfactual_radio_dosage = 0.0
+#                 counterfactual_chemo_application_point = 0
+#                 counterfactual_radio_application_point = 0
+
+#                 if treatment_option[0] == 1:
+#                     counterfactual_chemo_application_point = 1
+#                     current_chemo_dose = chemo_amt[0]
+
+#                 if treatment_option[1] == 1:
+#                     counterfactual_radio_application_point = 1
+#                     counterfactual_radio_dosage = radio_amt[0]
+
+#                 counterfactual_chemo_dosage = previous_chemo_dose * np.exp(
+#                     -np.log(2) / drug_half_life) + current_chemo_dose
+
+#                 counterfactual_cancer_volume = factual_cancer_volume[t] *\
+#                     (1 + rho * np.log(K / factual_cancer_volume[t]) - beta_c * counterfactual_chemo_dosage -
+#                         (alpha * counterfactual_radio_dosage + beta * counterfactual_radio_dosage ** 2) + noise[t + 1])
+
+#                 cancer_volume[test_idx][:t + 2] = np.append(factual_cancer_volume[:t + 1],
+#                                                             [counterfactual_cancer_volume])
+#                 chemo_application_point[test_idx][:t + 1] = np.append(factual_chemo_application_point[:t],
+#                                                                       [counterfactual_chemo_application_point])
+#                 radio_application_point[test_idx][:t + 1] = np.append(factual_radio_application_point[:t],
+#                                                                       [counterfactual_radio_application_point])
+#                 patient_types_all_trajectories[test_idx] = patient_types[i]
+#                 sequence_lengths[test_idx] = int(t) + 1
+#                 test_idx = test_idx + 1
+
+#             if (factual_cancer_volume[t + 1] >= TUMOUR_DEATH_THRESHOLD) or \
+#                     recovery_rvs[t] <= np.exp(-factual_cancer_volume[t + 1] * TUMOUR_CELL_DENSITY):
+#                 break
+
+#     outputs = {'cancer_volume': cancer_volume[:test_idx],
+#                'chemo_application': chemo_application_point[:test_idx],
+#                'radio_application': radio_application_point[:test_idx],
+#                'sequence_lengths': sequence_lengths[:test_idx],
+#                'patient_types': patient_types_all_trajectories[:test_idx]
+#                }
+
+#     print("Call to simulate counterfactuals data")
+
+#     return outputs
+
 def simulate_counterfactual_1_step(simulation_params, seq_length):
     """
-    Simulation of test trajectories to asses all one-step ahead counterfactuals
-    :param simulation_params: Parameters of the simulation
-    :param seq_length: Maximum trajectory length (number of factual time-steps)
-    :return: simulated data dict with number of rows equal to num_patients * seq_length * num_treatments
+    Simulation of test trajectories to assess all one-step ahead counterfactuals.
+    
+    In addition to the original outputs, we now also return the median, 5th percentile,
+    and 95th percentile cancer volumes computed from 1000 noise replicates for the one-step
+    ahead update.
+    
+    :param simulation_params: Parameters of the simulation.
+    :param seq_length: Maximum trajectory length (number of factual time-steps).
+    :return: simulated data dict with number of rows equal to num_patients * seq_length * num_treatments.
+             The dictionary now also contains:
+             - median_cancer_volume
+             - cancer_volume_5th_percentile
+             - cancer_volume_95th_percentile
     """
 
     total_num_radio_treatments = 1
@@ -382,8 +578,8 @@ def simulate_counterfactual_1_step(simulation_params, seq_length):
 
     num_treatments = 4  # No treatment / Chemotherapy / Radiotherapy / Chemotherapy + Radiotherapy
 
-    radio_amt = np.array([2.0 for i in range(total_num_radio_treatments)])  # Gy
-    # radio_days = np.array([i + 1 for i in range(total_num_radio_treatments)])
+    radio_amt = np.array(
+        [2.0 for i in range(total_num_radio_treatments)])  # Gy
     chemo_amt = [5.0 for i in range(total_num_chemo_treatments)]
     chemo_days = [(i + 1) * 7 for i in range(total_num_chemo_treatments)]
 
@@ -416,22 +612,25 @@ def simulate_counterfactual_1_step(simulation_params, seq_length):
 
     num_test_points = num_patients * seq_length * num_treatments
 
-    # Commence Simulation
+    # Pre-allocate arrays for outcomes and additional quantile outputs.
     cancer_volume = np.zeros((num_test_points, seq_length))
     chemo_application_point = np.zeros((num_test_points, seq_length))
     radio_application_point = np.zeros((num_test_points, seq_length))
     sequence_lengths = np.zeros(num_test_points)
     patient_types_all_trajectories = np.zeros(num_test_points)
 
+    # New outputs: one value per trajectory for the one-step-ahead simulation
+    median_cancer_volume = np.zeros((num_test_points, seq_length))
+    cancer_volume_5th_percentile = np.zeros((num_test_points, seq_length))
+    cancer_volume_95th_percentile = np.zeros((num_test_points, seq_length))
+
     test_idx = 0
 
-    # Run actual simulation
+    # Run simulation over patients.
     for i in tqdm(range(num_patients), total=num_patients):
 
-        # if i % 200 == 0:
-        #     logging.info("Simulating patient {} of {}".format(i, num_patients))
-
-        noise = 0.01 * np.random.randn(seq_length)  # 5% cell variability
+        # 1 noise per time step (for the main simulation)
+        noise = 0.01 * np.random.randn(seq_length)
         recovery_rvs = np.random.rand(seq_length)
 
         # initial values
@@ -442,6 +641,10 @@ def simulate_counterfactual_1_step(simulation_params, seq_length):
         factual_radio_application_point = np.zeros(seq_length)
         factual_chemo_probabilities = np.zeros(seq_length)
         factual_radio_probabilities = np.zeros(seq_length)
+        simulated_outcomes = np.zeros((1000, seq_length))
+        median_cancer_volume_factual = np.zeros(seq_length)
+        cancer_volume_5th_percentile_factual = np.zeros(seq_length)
+        cancer_volume_95th_percentile_factual = np.zeros(seq_length)
 
         chemo_application_rvs = np.random.rand(seq_length)
         radio_application_rvs = np.random.rand(seq_length)
@@ -456,7 +659,7 @@ def simulate_counterfactual_1_step(simulation_params, seq_length):
 
         for t in range(0, seq_length - 1):
 
-            # Factual prev_treatments and outcomes
+            # Factual previous treatments and outcomes
             current_chemo_dose = 0.0
             previous_chemo_dose = 0.0 if t == 0 else factual_chemo_dosage[t - 1]
 
@@ -464,14 +667,18 @@ def simulate_counterfactual_1_step(simulation_params, seq_length):
             if t >= lag:
                 cancer_volume_used = cancer_volume[i, max(t - window_size - lag, 0):max(t - lag + 1, 0)]
             else:
-                cancer_volume_used = np.zeros((1, ))
+                cancer_volume_used = np.zeros((1,))
             cancer_diameter_used = np.array(
-                [calc_diameter(vol) for vol in cancer_volume_used]).mean()  # mean diameter over 15 days
+                [calc_diameter(vol) for vol in cancer_volume_used]).mean()  # mean diameter over lookback window
             cancer_metric_used = cancer_diameter_used
 
-            # probabilities
-            radio_prob = (1.0 / (1.0 + np.exp(-radio_sigmoid_betas[i] * (cancer_metric_used - radio_sigmoid_intercepts[i]))))
-            chemo_prob = (1.0 / (1.0 + np.exp(- chemo_sigmoid_betas[i] * (cancer_metric_used - chemo_sigmoid_intercepts[i]))))
+            # probabilities (sigmoid functions)
+            radio_prob = 1.0 / \
+                (1.0 + np.exp(-radio_sigmoid_betas[i] *
+                 (cancer_metric_used - radio_sigmoid_intercepts[i])))
+            chemo_prob = 1.0 / \
+                (1.0 + np.exp(-chemo_sigmoid_betas[i] *
+                 (cancer_metric_used - chemo_sigmoid_intercepts[i])))
 
             factual_chemo_probabilities[t] = chemo_prob
             factual_radio_probabilities[t] = radio_prob
@@ -485,32 +692,51 @@ def simulate_counterfactual_1_step(simulation_params, seq_length):
                 factual_chemo_application_point[t] = 1
                 current_chemo_dose = chemo_amt[0]
 
-            # Update chemo dosage
+            # Update chemo dosage with decay.
             factual_chemo_dosage[t] = previous_chemo_dose * np.exp(-np.log(2) / drug_half_life) + current_chemo_dose
 
-            # Factual prev_treatments and outcomes
-            factual_cancer_volume[t + 1] = factual_cancer_volume[t] * \
-                (1 + rho * np.log(K / factual_cancer_volume[t]) - beta_c * factual_chemo_dosage[t] -
-                    (alpha * factual_radio_dosage[t] + beta * factual_radio_dosage[t] ** 2) + noise[t + 1])
+            # Factual outcome update for time t+1.
+            factual_cancer_volume[t + 1] = factual_cancer_volume[t] * (
+                1 + rho * np.log(K / factual_cancer_volume[t]) - beta_c * factual_chemo_dosage[t] -
+                (alpha * factual_radio_dosage[t] + beta * (factual_radio_dosage[t] ** 2)) + noise[t + 1])
+            factual_cancer_volume[t + 1] = np.clip(
+                factual_cancer_volume[t + 1], 0, TUMOUR_DEATH_THRESHOLD)
 
-            factual_cancer_volume[t + 1] = np.clip(factual_cancer_volume[t + 1], 0, TUMOUR_DEATH_THRESHOLD)
+            # --- Compute quantiles for the one-step update (factual branch) ---
+            # Here we re-simulate the one-step update using 1000 noise samples.
+            noise_samples = 0.01 * np.random.randn(1000)
+            simulated_outcomes[:, t+1] = factual_cancer_volume[t] * (
+                1 + rho * np.log(K / factual_cancer_volume[t]) - beta_c * factual_chemo_dosage[t] -
+                (alpha * factual_radio_dosage[t] + beta * (factual_radio_dosage[t] ** 2)) + noise_samples)
 
-            # Populate arrays
+            median_cancer_volume_factual[t + 1] = np.percentile(
+                simulated_outcomes[:, t+1], 50, axis=0)
+            cancer_volume_5th_percentile_factual[t + 1] = np.percentile(
+                simulated_outcomes[:, t+1], 5, axis=0)
+            cancer_volume_95th_percentile_factual[t + 1] = np.percentile(
+                simulated_outcomes[:, t+1], 95, axis=0)
+
+            # Populate arrays for factual trajectory.
             cancer_volume[test_idx] = factual_cancer_volume
+            median_cancer_volume[test_idx] = median_cancer_volume_factual
+            cancer_volume_5th_percentile[test_idx] = cancer_volume_5th_percentile_factual
+            cancer_volume_95th_percentile[test_idx] = cancer_volume_95th_percentile_factual
             chemo_application_point[test_idx] = factual_chemo_application_point
             radio_application_point[test_idx] = factual_radio_application_point
             patient_types_all_trajectories[test_idx] = patient_types[i]
             sequence_lengths[test_idx] = int(t) + 1
-            test_idx = test_idx + 1
+            test_idx += 1
 
-            # Counterfactual prev_treatments and outcomes
-            treatment_options = [(0, 0), (0, 1), (1, 0), (1, 1)]  # First = chemo; second = radio
-
+            # --- Counterfactual treatment options ---
+            treatment_options = [(0, 0), (0, 1), (1, 0),
+                                 (1, 1)]  # (chemo, radio)
             for treatment_option in treatment_options:
-                if (factual_chemo_application_point[t] == treatment_option[0] and factual_radio_application_point[t] ==
-                        treatment_option[1]):
-                    # This represents the factual treatment which was already considered
+                # Skip the option that is the factual treatment.
+                if (factual_chemo_application_point[t] == treatment_option[0] and
+                        factual_radio_application_point[t] == treatment_option[1]):
                     continue
+
+                # Reset treatment-specific variables for the counterfactual branch.
                 current_chemo_dose = 0.0
                 counterfactual_radio_dosage = 0.0
                 counterfactual_chemo_application_point = 0
@@ -524,33 +750,67 @@ def simulate_counterfactual_1_step(simulation_params, seq_length):
                     counterfactual_radio_application_point = 1
                     counterfactual_radio_dosage = radio_amt[0]
 
-                counterfactual_chemo_dosage = previous_chemo_dose * np.exp(
-                    -np.log(2) / drug_half_life) + current_chemo_dose
+                # Update chemo dosage for the counterfactual branch.
+                counterfactual_chemo_dosage = previous_chemo_dose * \
+                    np.exp(-np.log(2) / drug_half_life) + current_chemo_dose
 
-                counterfactual_cancer_volume = factual_cancer_volume[t] *\
-                    (1 + rho * np.log(K / factual_cancer_volume[t]) - beta_c * counterfactual_chemo_dosage -
-                        (alpha * counterfactual_radio_dosage + beta * counterfactual_radio_dosage ** 2) + noise[t + 1])
+                # Compute the one-step counterfactual outcome (using the same noise[t+1] as the main simulation).
+                counterfactual_cancer_volume = factual_cancer_volume[t] * (
+                    1 + rho * np.log(K / factual_cancer_volume[t]) - beta_c * counterfactual_chemo_dosage -
+                    (alpha * counterfactual_radio_dosage + beta * (counterfactual_radio_dosage ** 2)) + noise[t + 1])
+                # counterfactual_cancer_volume = np.clip(
+                #     counterfactual_cancer_volume, 0, TUMOUR_DEATH_THRESHOLD)
+
+                # --- Append simulated outcomes for the counterfactual branch ---
+                # Generate 1000 noise samples to simulate the one-step update.
+                noise_samples = 0.01 * np.random.randn(1000)
+                # Compute the simulated outcomes (a 1D array of 1000 values) for time t+1.
+                simulated_outcomes[:, t+1] = factual_cancer_volume[t] * (
+                    1 + rho * np.log(K / factual_cancer_volume[t]) - beta_c * counterfactual_chemo_dosage -
+                    (alpha * counterfactual_radio_dosage + beta * (counterfactual_radio_dosage ** 2)) + noise_samples)
+
+                # Compute the quantiles from the newly appended column.
+                median_cancer_volume_counterfactual = np.percentile(
+                    simulated_outcomes[:, t+1], 50, axis=0)
+                cancer_volume_5th_percentile_counterfactual = np.percentile(
+                    simulated_outcomes[:, t+1], 5, axis=0)
+                cancer_volume_95th_percentile_counterfactual = np.percentile(
+                    simulated_outcomes[:, t+1], 95, axis=0)
+
+                # Populate arrays for counterfactual trajectory.
+                # Append the counterfactual one-step outcome to the factual history.
 
                 cancer_volume[test_idx][:t + 2] = np.append(factual_cancer_volume[:t + 1],
                                                             [counterfactual_cancer_volume])
+                median_cancer_volume[test_idx][:t + 2] = np.append(median_cancer_volume_factual[:t + 1],
+                                                                   [median_cancer_volume_counterfactual])
+                cancer_volume_5th_percentile[test_idx][:t + 2] = np.append(cancer_volume_5th_percentile_factual[:t + 1],
+                                                                           [cancer_volume_5th_percentile_counterfactual])
+                cancer_volume_95th_percentile[test_idx][:t + 2] = np.append(cancer_volume_95th_percentile_factual[:t + 1],
+                                                                            [cancer_volume_95th_percentile_counterfactual])
                 chemo_application_point[test_idx][:t + 1] = np.append(factual_chemo_application_point[:t],
                                                                       [counterfactual_chemo_application_point])
                 radio_application_point[test_idx][:t + 1] = np.append(factual_radio_application_point[:t],
                                                                       [counterfactual_radio_application_point])
                 patient_types_all_trajectories[test_idx] = patient_types[i]
                 sequence_lengths[test_idx] = int(t) + 1
-                test_idx = test_idx + 1
+                test_idx += 1
 
+            # Check for terminal condition (tumour death or recovery).
             if (factual_cancer_volume[t + 1] >= TUMOUR_DEATH_THRESHOLD) or \
-                    recovery_rvs[t] <= np.exp(-factual_cancer_volume[t + 1] * TUMOUR_CELL_DENSITY):
+               (recovery_rvs[t] <= np.exp(-factual_cancer_volume[t + 1] * TUMOUR_CELL_DENSITY)):
                 break
 
-    outputs = {'cancer_volume': cancer_volume[:test_idx],
-               'chemo_application': chemo_application_point[:test_idx],
-               'radio_application': radio_application_point[:test_idx],
-               'sequence_lengths': sequence_lengths[:test_idx],
-               'patient_types': patient_types_all_trajectories[:test_idx]
-               }
+    outputs = {
+        'cancer_volume': cancer_volume[:test_idx],
+        'chemo_application': chemo_application_point[:test_idx],
+        'radio_application': radio_application_point[:test_idx],
+        'sequence_lengths': sequence_lengths[:test_idx],
+        'patient_types': patient_types_all_trajectories[:test_idx],
+        'median_cancer_volume': median_cancer_volume[:test_idx],
+        'cancer_volume_5th_percentile': cancer_volume_5th_percentile[:test_idx],
+        'cancer_volume_95th_percentile': cancer_volume_95th_percentile[:test_idx]
+    }
 
     print("Call to simulate counterfactuals data")
 

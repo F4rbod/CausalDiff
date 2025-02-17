@@ -206,7 +206,18 @@ class TimeVaryingCausalModel(LightningModule):
         return bce_orig, bce_all
 
     def get_normalised_masked_rmse(self, dataset: Dataset, one_step_counterfactual=False):
+        dataset_copy = deepcopy(dataset)
         logger.info(f'RMSE calculation for {dataset.subset_name}.')
+        sequence_lengths = dataset.data['sequence_lengths']
+        logger.info(f'dataset output shape: {dataset.data["outputs"].shape}')
+
+        for key in dataset.data.keys():
+            dataset.data[key] = dataset.data[key][sequence_lengths >= 10]
+
+        dataset.data['outputs'] = dataset.data['outputs'][:, :, 1:2]
+        dataset.data['unscaled_outputs'] = dataset.data['unscaled_outputs'][:, :, 1:2]
+        logger.info(f'dataset output shape: {dataset.data["outputs"].shape}')
+
         outputs_scaled = self.get_predictions(dataset)
         unscale = self.hparams.exp.unscale_rmse
         percentage = self.hparams.exp.percentage_rmse
@@ -251,6 +262,7 @@ class TimeVaryingCausalModel(LightningModule):
                 rmse_normalised_last *= 100.0
 
             return rmse_normalised_orig, rmse_normalised_all, rmse_normalised_last
+            dataset = dataset_copy
 
         return rmse_normalised_orig, rmse_normalised_all
 
