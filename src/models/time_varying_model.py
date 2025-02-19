@@ -211,12 +211,16 @@ class TimeVaryingCausalModel(LightningModule):
         sequence_lengths = dataset.data['sequence_lengths']
         logger.info(f'dataset output shape: {dataset.data["outputs"].shape}')
 
-        for key in dataset.data.keys():
-            dataset.data[key] = dataset.data[key][sequence_lengths >= 10]
+        if one_step_counterfactual:
+            for key in dataset.data.keys():
+                dataset.data[key] = dataset.data[key][sequence_lengths >= 10]
 
-        dataset.data['outputs'] = dataset.data['outputs'][:, :, 1:2]
-        dataset.data['unscaled_outputs'] = dataset.data['unscaled_outputs'][:, :, 1:2]
-        logger.info(f'dataset output shape: {dataset.data["outputs"].shape}')
+            dataset.data['outputs'] = dataset.data['outputs'][:, :, 1:2]
+            dataset.data['unscaled_outputs'] = dataset.data['unscaled_outputs'][:, :, 1:2]
+            logger.info(
+                f'dataset output shape: {dataset.data["outputs"].shape}')
+            logger.info(
+                f'first output: {dataset.data["outputs"][0]}')
 
         outputs_scaled = self.get_predictions(dataset)
         unscale = self.hparams.exp.unscale_rmse

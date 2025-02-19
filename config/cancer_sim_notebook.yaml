@@ -31,3 +31,5 @@ exp:
   percentage_rmse: True
   seed: 100
   max_epochs: 100
+  logging: True                     # Enable MLFlow logging
+  mlflow_uri: http://127.0.0.1:8081   # MLFlow server URI

@@ -11,6 +11,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from einops import rearrange
 
+from tqdm import tqdm
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -850,6 +852,12 @@ class ResidualBlock(nn.Module):
             self.moded_linear_time_and_feature = nn.Linear(
                 embed_dim, embed_dim)
 
+        elif method == "simple_neural_network":
+            self.linear1 = nn.Linear(embed_dim, embed_dim)
+            self.linear2 = nn.Linear(embed_dim, ff_dim)
+            self.linear3 = nn.Linear(ff_dim, ff_dim)
+            self.linear4 = nn.Linear(ff_dim, embed_dim)
+
         else:
             raise NotImplementedError
 
@@ -934,6 +942,17 @@ class ResidualBlock(nn.Module):
         elif self.method == "moded_transformer_alone":
             y = self.moded_feature_and_time_transformer(y)
             y = self.moded_linear_time_and_feature(y)
+
+        elif self.method == "simple_neural_network":
+            y = y.reshape(b, t * f, e)
+            y = self.linear1(y)
+            y = F.silu(y)
+            y = self.linear2(y)
+            y = F.silu(y)
+            # y = self.linear3(y)
+            # y = F.silu(y)
+            y = self.linear4(y)
+            y = y.reshape(b, t, f, e)
 
         y = (y + y_resid) / math.sqrt(2.0)
         y = self.layer_norm(y)
@@ -1093,15 +1112,20 @@ def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):
     if schedule_name == "linear":
         # Linear schedule from Ho et al, extended to work for any number of
         # diffusion steps.
-        scale = 1000 / num_diffusion_timesteps
+        if num_diffusion_timesteps < 100:
+            scale = 100 / num_diffusion_timesteps
+        else:
+            scale = 1000 / num_diffusion_timesteps
         beta_start = scale * 0.0001
         beta_end = scale * 0.02
         return torch.linspace(beta_start, beta_end, num_diffusion_timesteps)
+
     elif schedule_name == "cosine":
         return betas_for_alpha_bar(
             num_diffusion_timesteps,
             lambda t: math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2,
         )
+
     elif schedule_name == "quadratic":
         scale = 50 / num_diffusion_timesteps
         beta_start = scale * 0.0001
@@ -1167,12 +1191,20 @@ class diffusion_imputation(nn.Module):
         self.emb_dim = emb_dim
         self.strategy = strategy
         self.features_to_impute = features_to_impute
-        self.missing_prp = missing_prp
-        self.diffusion_steps = diffusion_steps
-        self.last_n_time = last_n_time
         self.exclude_features = excluded_features
+        self.num_residual_layers = num_residual_layers
         self.features_to_impute_completely = features_to_impute_completely
         self.features_to_impute_after_time = features_to_impute_after_time
+        self.last_n_time = last_n_time
+        self.missing_prp = missing_prp
+        self.diffusion_steps = diffusion_steps
+        self.diffusion_beta_schedule = diffusion_beta_schedule
+        self.num_heads = num_heads
+        self.kernel_size = kernel_size
+        self.ff_dim = ff_dim
+        self.num_cells = num_cells
+        self.dropout = dropout
+        self.method = method
         self.sequence_length = sequence_length
 
         # set device to cuda if available
@@ -1256,6 +1288,13 @@ class diffusion_imputation(nn.Module):
                 if i < mask.shape[0]:
                     mask[i, (sequence_length - self.last_n_time)
                              :sequence_length, self.features_to_impute] = 1
+
+        if strategy == "selected_features_sequence_length":
+            mask = torch.zeros_like(data)
+            for i in range(self.sequence_length.shape[0]):
+                sequence_length = int(self.sequence_length[i])
+                if i < mask.shape[0]:
+                    mask[i, :sequence_length, self.features_to_impute] = 1
 
         if strategy == "whole_sequence":
             mask = torch.ones_like(data)
@@ -1515,7 +1554,7 @@ class diffusion_imputation(nn.Module):
 
         return (imputed_samples, data, imputation_mask)
 
-    def eval(
+    def get_predictions(
         self,
         data,
         imputation_mask,
@@ -1537,8 +1576,8 @@ class diffusion_imputation(nn.Module):
 
         with torch.no_grad():
 
-            for t in range(self.diffusion_steps - 1, -1, -1):
-
+            # for t in range(self.diffusion_steps - 1, -1, -1):
+            for t in tqdm(range(self.diffusion_steps - 1, -1, -1), desc="Diffusion Steps", leave=False):
                 x = x.unsqueeze(3).float()
                 predicted_noise = self.model_loop(
                     x, imputation_mask.unsqueeze(
@@ -1564,6 +1603,7 @@ class diffusion_imputation(nn.Module):
                     x * imputation_mask
 
             imputed_samples = x.detach()
+            imputed_samples[torch.isnan(imputed_samples)] = 0
 
         if show_max_diff == True:
             # show the data at torch.max(torch.abs(data[imputation_mask !=0] - imputed_samples[imputation_mask !=0]))

@@ -1,0 +1,132 @@
+# @package _global_
+dataset:
+  _target_: src.data.SyntheticCancerDatasetCollection   # Will be dynamically instantiated
+  name: tumor_generator
+  coeff: 4                                            # Confounding coefficient (gamma)
+  chemo_coeff: ${dataset.coeff}                       # Confounding coefficient of chemotherapy
+  radio_coeff: ${dataset.coeff}                       # Confounding coefficient of radiotherapy
+  seed: ${exp.seed}
+  num_patients:
+    train: 10000
+    val: 1000
+    test: 100
+  window_size: 15                                     # Used for biased treatment assignment
+  lag: 0                                              # Lag for treatment assignment window
+  max_seq_length: 60                                  # Max length of time series
+  projection_horizon: 5                               # Range of tau-step-ahead prediction (tau = projection_horizon + 1)
+  cf_seq_mode: sliding_treatment                      # sliding_treatment / random_trajectories
+  val_batch_size: 512                                 # Batch size for evaluation
+  treatment_mode: multiclass                          # multiclass / multilabel -- for RMSN
+
+# --- Active CRN configuration: domain_confusion variant ---
+model:
+  name: CRN
+  encoder:
+    _target_: src.models.crn.CRNEncoder
+    seq_hidden_units: 24           # rnn_hidden_units in original terminology
+    br_size: 6
+    fc_hidden_units: 18
+    dropout_rate: 0.2             # Dropout for LSTM hidden & output layers
+    num_layer: 1
+    batch_size: 64
+    optimizer:
+      optimizer_cls: adam
+      learning_rate: 0.01
+      weight_decay: 0.0
+      lr_scheduler: False
+    tune_hparams: False           # Hyperparameter tuning disabled
+    tune_range: 50
+    hparams_grid:
+    resources_per_trial:
+  train_decoder: False
+  decoder:
+    _target_: src.models.crn.CRNDecoder
+    seq_hidden_units: 24           # rnn_hidden_units in original terminology
+    br_size: 3
+    fc_hidden_units: 9
+    dropout_rate: 0.2             # Dropout for LSTM hidden & output layers
+    num_layer: 1
+    batch_size: 512
+    optimizer:
+      optimizer_cls: adam
+      learning_rate: 0.001
+      weight_decay: 0.0
+      lr_scheduler: False
+    tune_hparams: False           # Hyperparameter tuning disabled
+    tune_range: 30
+    hparams_grid:
+    resources_per_trial:
+
+exp:
+  unscale_rmse: True
+  percentage_rmse: True
+  seed: 100
+  weights_ema: True
+  gpus: [0]                         # Number/indices of GPUs to use
+  logging: True                     # Enable MLFlow logging
+  mlflow_uri: http://127.0.0.1:8081   # MLFlow server URI
+  alpha: 0.01
+  beta: 0.99 
+  balancing: domain_confusion
+  max_epochs: 150
+  alpha_rate: exp
+  update_alpha: False
+  bce_weight: False 
+
+# --- If using grad_reverse instead, uncomment the block below and comment out the active block above ---
+#
+# dataset:
+#   coeff: 4.0
+#
+# model:
+#   name: CRN
+#   encoder:
+#     _target_: src.models.crn.CRNEncoder
+#     seq_hidden_units: 24
+#     br_size: 24
+#     fc_hidden_units: 96
+#     dropout_rate: 0.2
+#     num_layer: 1
+#     batch_size: 64
+#     optimizer:
+#       optimizer_cls: adam
+#       learning_rate: 0.001
+#       weight_decay: 0.0
+#       lr_scheduler: False
+#     tune_hparams: False
+#     tune_range: 50
+#     hparams_grid:
+#     resources_per_trial:
+#   train_decoder: True
+#   decoder:
+#     _target_: src.models.crn.CRNDecoder
+#     seq_hidden_units: 24
+#     br_size: 24
+#     fc_hidden_units: 12
+#     dropout_rate: 0.1
+#     num_layer: 1
+#     batch_size: 1024
+#     optimizer:
+#       optimizer_cls: adam
+#       learning_rate: 0.001
+#       weight_decay: 0.0
+#       lr_scheduler: False
+#     tune_hparams: False
+#     tune_range: 30
+#     hparams_grid:
+#     resources_per_trial:
+#
+# exp:
+#   unscale_rmse: True
+#   percentage_rmse: True
+#   seed: 100
+#   weights_ema: False
+#   gpus: [0]
+#   logging: True
+#   mlflow_uri: http://127.0.0.1:8081
+#   alpha: 1.0
+#   balancing: grad_reverse
+#   max_epochs: 100
+#   alpha_rate: exp
+#   update_alpha: False
+#   bce_weight: False

@@ -33,7 +33,9 @@ class SyntheticDatasetCollection:
     def process_data_encoder(self):
         self.train_f.process_data(self.train_scaling_params)
         self.val_f.process_data(self.train_scaling_params)
-        self.test_cf_one_step.process_data(self.train_scaling_params)
+        # self.test_cf_one_step.process_data(self.train_scaling_params)
+        self.test_cf_one_step.process_data_cf_one_step(
+            self.train_scaling_params)
         self.processed_data_encoder = True
 
     def process_propensity_train_f(self, propensity_treatment, propensity_history):

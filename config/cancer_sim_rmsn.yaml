@@ -1,0 +1,108 @@
+# @package _global_
+dataset:
+  _target_: src.data.SyntheticCancerDatasetCollection   # Will be dynamically instantiated
+  name: tumor_generator
+  coeff: 4                                            # Confounding coefficient (gamma)
+  chemo_coeff: ${dataset.coeff}                         # Confounding coefficient of chemotherapy
+  radio_coeff: ${dataset.coeff}                         # Confounding coefficient of radiotherapy
+  seed: ${exp.seed}
+  num_patients:
+    train: 10000
+    val: 1000
+    test: 100
+  window_size: 15                                       # Used for biased treatment assignment
+  lag: 0                                                # Lag for treatment assignment window
+  max_seq_length: 60                                    # Max length of time series
+  projection_horizon: 5                                 # Range of tau-step-ahead prediction (tau = projection_horizon + 1)
+  cf_seq_mode: sliding_treatment                        # sliding_treatment / random_trajectories
+  val_batch_size: 512                                   # Batch size for evaluation
+  treatment_mode: multilabel                            # multiclass / multilabel -- for RMSN
+
+model:
+  name: RMSN
+
+  propensity_treatment:
+    _target_: src.models.rmsn.RMSNPropensityNetworkTreatment
+    seq_hidden_units: 8                 # LSTM hidden units (d_h)
+    dropout_rate: 0.2                   # Dropout of LSTM hidden layers
+    num_layer: 1
+    batch_size: 64
+    max_grad_norm: 2.0
+    optimizer:
+      optimizer_cls: adam
+      learning_rate: 0.01
+      weight_decay: 0.0
+      lr_scheduler: False
+    tune_hparams: False                 # Hparam tuning
+    tune_range: 50
+    resources_per_trial:
+    hparams_grid:
+
+  propensity_history:
+    _target_: src.models.rmsn.RMSNPropensityNetworkHistory
+    seq_hidden_units: 16                # LSTM hidden units (d_h)
+    dropout_rate: 0.5
+    num_layer: 1
+    batch_size: 128
+    max_grad_norm: 2.0
+    optimizer:
+      optimizer_cls: adam
+      learning_rate: 0.0001
+      weight_decay: 0.0
+      lr_scheduler: False
+    tune_hparams: False                 # Hparam tuning
+    tune_range: 50
+    resources_per_trial:
+    hparams_grid:
+
+  encoder:
+    _target_: src.models.rmsn.RMSNEncoder
+    seq_hidden_units: 12                # LSTM hidden units (d_h)
+    dropout_rate: 0.1                   # Dropout of LSTM hidden layers
+    num_layer: 1
+    batch_size: 128
+    max_grad_norm: 0.5
+    optimizer:
+      optimizer_cls: adam
+      learning_rate: 0.01
+      weight_decay: 0.0
+      lr_scheduler: False
+    tune_hparams: False                 # Hparam tuning
+    tune_range: 50
+    resources_per_trial:
+    hparams_grid:
+
+  train_decoder: False
+
+  decoder:
+    _target_: src.models.rmsn.RMSNDecoder
+    seq_hidden_units: 64                # LSTM hidden units (d_h)
+    dropout_rate: 0.1                   # Dropout of LSTM hidden layers
+    num_layer: 1
+    batch_size: 1024
+    max_grad_norm: 4.0
+    optimizer:
+      optimizer_cls: adam
+      learning_rate: 0.01
+      weight_decay: 0.0
+      lr_scheduler: False
+    tune_hparams: False                 # Hparam tuning
+    tune_range: 20
+    resources_per_trial:
+
+exp:
+  unscale_rmse: True
+  percentage_rmse: True
+  seed: 100
+  max_epochs: 100
+  gpus: [0]                         # Number of GPUs to use / indices of GPUs like [0,1]
+  logging: True                     # Logging to MlFlow
+  mlflow_uri: http://127.0.0.1:8081 # MlFlow server
+  alpha: 1.0                        # Has no full effect, if update_alpha is True
+  update_alpha: False                # Exponential growth of alpha from 0.0 to 1.0
+  alpha_rate: exp                   # exp / lin
+  balancing:                        # grad_reverse / domain_confusion
+
+  bce_weight: False                 # Weight in BCE loss, proportional to treatment frequency
+  weights_ema:                      # Exponential moving average of weights
+  beta: 0.99                        # EMA beta

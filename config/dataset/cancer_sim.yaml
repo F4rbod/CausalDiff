@@ -9,7 +9,7 @@ dataset:
   num_patients:
     train: 10000
     val: 1000
-    test: 1000
+    test: 100
   window_size: 15                                       # Used for biased treatment assignment
   lag: 0                                                # Lag for treatment assignment window
   max_seq_length: 60                                    # Max length of time series
